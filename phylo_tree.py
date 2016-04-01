@@ -68,13 +68,15 @@ class Node():
             #if an interior node sample covariance
             m = self.cov_mat.shape[0]
             if child.observed != True:
-                cov_mat_vec= self.cov_mat.reshape((m**2,))
-                #sample from normal distribution
-                sample = [np.random.normal(cov_mat_vec[i],weight,1)
-                            for i in range(m**2)]
-                #reshape sample to be a covariance matrix
-                s = np.array(sample)
-                s = s.reshape((m,m))
+                #sample upper triangle of covariance matrix
+                sample = np.zeros((m,m))
+                for i in range(m):
+                    for j in range(i,m):
+                        #sample from normal distribution around parent value
+                        sample[i,j] = np.random.normal(self.cov_mat[i,j],
+                                                        weight,1)
+                #go from upper triangular to symmetric
+                s = sample + sample.T
                 child.set_covariance(s)
                 child.sample()
             #if a child is an observed node sample data
@@ -121,8 +123,8 @@ class PhyloTreeSample():
         #make the scale of inverse chi squared half the size of the lowest 
         #eigenvalue
         eVals = np.linalg.eigvals(cov_mat)
-        self.scale = eVals[-1] / 2
-        self.df = 10
+        self.scale = eVals[-1] / 10
+        self.df = 4
         self.root = root
         self.n_nodes = 1
         self.generate_from_node(root,p)
@@ -134,7 +136,6 @@ class PhyloTreeSample():
         #sample over Uniform(0,1)
         u = random.random()
         #number of children is 1 with probability p
-        tmp = (u,p, u > p)
         n_child = 1 + int(u > p)
         #if one child, then make that child an observed node with no children
         if n_child == 1:
