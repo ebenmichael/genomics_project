@@ -88,18 +88,20 @@ class Node():
         return(self.__str__())
             
     def __str__(self):
-        if self.index != None:
-            string = "Node_" + str(self.index)
-            if self.observed:
-                string += "_O"
+        if not self.observed:
+            if self.index != None:
+                string = "Node_" + str(self.index)
+            else:
+                string = "Node"
         else:
-            string = "Node"
-            if self.observed:
-                string += "_O"
+            if self.parent.index != None:
+                string = "Node_" + str(self.parent.index) + "_O"
+            else:
+                string = "Node_O"
         return(string)
 
-class PhyloTree():
-    
+class PhyloTreeSample():
+    """Class for sampling data from a phylogeny tree"""
     
     def __init__(self):
         """Empty construtor"""
@@ -108,6 +110,7 @@ class PhyloTree():
         #number of nodes
         self.n_nodes = 0
         #degrees of freedom for sampling variance parameters
+        self.leaves = None
 
         
     def generate_tree(self,p, dim = 50):
@@ -132,12 +135,10 @@ class PhyloTree():
         u = random.random()
         #number of children is 1 with probability p
         tmp = (u,p, u > p)
-        print(tmp)
         n_child = 1 + int(u > p)
         #if one child, then make that child an observed node with no children
         if n_child == 1:
-            child = Node(parent = root, observed = True, index = self.n_nodes)
-            self.n_nodes += 1
+            child = Node(parent = root, observed = True, index = root.index)
             #randomly sample a number of data elements
             n = random.randint(10,100)
             root.add_child(child,n)
@@ -150,7 +151,6 @@ class PhyloTree():
             #randomly sample variances from scaled inverse chi squared (df,scale)
             d1 = self.scale * self.df * 1 / np.random.chisquare(self.df)
             d2 = self.scale * self.df * 1 / np.random.chisquare(self.df)
-            print(d1)
             root.add_children([(child1,d1), (child2,d2)])
             #recursively do the same with children
             self.generate_from_node(child1,p)
@@ -184,31 +184,42 @@ class PhyloTree():
         """samples recursively, returns data"""
         self.root.sample()
         return(self.get_data())
-    
-    def get_data(self):
-        """Uses breadth first search to find observed nodes and get data"""
+        
+    def collect_leaves(self):
+        """Collect all leaf nodes (above observed nodes) with BFS"""
         q1 = [self.root]
         q2 = []
         finished = False
-        data = []
+        self.leaves = []
         while not finished:
             node = q1.pop()
-            if node.observed == True:
-                data.append(node.data)
-            #add children to lower level queue
-            for child,weight in node.children:
-                q2.insert(0,child)
+            if len(node.children) == 1:
+                self.leaves.append(node)
+            else:
+                #add children to lower level queue
+                for child,weight in node.children:
+                    q2.insert(0,child)
             #if upper level queue is empty, switch to lower level queue
             if len(q1) == 0:
                 if len(q2) != 0:
                     q1 = q2
                     q2 = []
                 else:
-                    finished = True
-        return(data)        
+                    finished = True         
         
-
-    
+        
+    def get_data(self):
+        """Get data from leaves"""
+        
+        #collect leaves if haven't already
+        if self.leaves == None:
+            self.collect_leaves()
+        data = []
+        for leaf in self.leaves:
+            data.append(leaf.children[0][0].data)
+        
+        return(data)
+        
     def __repr__(self):
         return(self.__str__())
         
@@ -216,5 +227,129 @@ class PhyloTree():
         return(self.bfs_string())
             
         
+class PhyloTreeFit(PhyloTreeSample):
+    """Class for fitting a phylogeny tree from data"""
     
+    def __init__(self):
+        """Null constructor"""
+        self.nodes = []
+        self.weights = []
+        self.n_nodes = 0
+
+    def fit(self,X):
+        """Uses structural EM to fit a phylogeny tree to data
+        Input:
+            X:list of length n_tissues of matrices of shape n_samples x n_genes
+        """
+        #first initialize the topology by using neighbor joining
+        self.neighbor_join(X)
+        #do EM until convergence 
+        tol = .0001
+        diff = 1
+        while diff > tol:
+            #fit the ancestors based on given branch lengths and topologies
+            self.fit_ancestors()
+            #fit the branch_lengths between all internal nodes and all 
+            #internal nodes to leaf nodes
+            self.fit_branch_lengths()
+            #make a minimum spanning tree
+            self.mst()
+            
+    def neighbor_join(self, X):
+        """Uses neighbor joining algorithm to make a phylogenic tree used 
+            as initialization
+        Input:
+            X: n_samples x n_genes x n_tissues data tensor
+        """
+        #use average vectors for each tissue to calulcaute distances
+        avgs = [mat.mean(0) for mat in X]
+        #D = spatial.distance.squareform(spatial.distance.pdist(X.mean(0).T)
+        #initialize n_tissues clusters
+        n_tissues  = len(X)
+        
+        nodes = [Node(index = i) for i in range(n_tissues)]
+        #add observed nodes below the nodes
+        for i,node in enumerate(nodes):
+            obs_node = Node(data = X[i], observed = True, parent = node)
+            node.add_child(obs_node, X[i].shape[0])
+            
+        self.n_nodes = len(nodes)
+        #keep track of roots of each cluster
+        cluster_roots = [node for node in nodes]
+        #make a disctionary where pairs of nodes are keys and their distances 
+        #are the values
+        d = dict()
+        for node1 in nodes:
+            for node2 in nodes:
+                d[(node1,node2)] = np.linalg.norm(avgs[node1.index] - 
+                                                        avgs[node2.index])
+        r = dict()
+        count = 0
+        while len(cluster_roots) > 2:
+            #calculate r[k] for each cluster k
+            for cluster1 in cluster_roots:
+                val = 0
+                for cluster2 in cluster_roots:
+                    if cluster2 != cluster1:
+                        val += d[(cluster2,cluster1)]
+                r[cluster1] = val / (len(cluster_roots) - 2)
+            #find (k,m) minimizing d[(k,n)] - r[k] - r[m]
+            k_min = None
+            m_min = None
+            min_val = float("inf")
+            for k in cluster_roots:
+                for m in cluster_roots:
+                    if k != m:
+                        tmp_val = d[(k,m)] - r[k] - r[m]
+                        if tmp_val < min_val:
+                            k_min = k
+                            m_min = m
+                            min_val = tmp_val
+            #define a new node which is the parent of the minimizers
+            new_node = Node(index = self.n_nodes)
+            self.n_nodes += 1
+            #remove k and m
+            k = k_min
+            m = m_min
+
+            cluster_roots.remove(k)
+            cluster_roots.remove(m)
+
+            for s in cluster_roots:
+                d[(new_node,s)] = .5 * (d[(k,s)] + d[(m,s)] - d[(k,m)])
+                d[(s,new_node)] = d[(new_node,s)]
+            #set distance to self to zero
+            d[(new_node,new_node)] = 0
+            #join nodes k and m to new_node
+            d1 = .5 * (d[(k,m)] - r[k] - r[m])
+            new_node.add_child(k,d1)
+            d2 = .5 * (d[(k,m)] + r[m] - r[k])
+            new_node.add_child(m,d2)
+            k.parent = new_node
+            m.parent = new_node
+            #add new_node to cluster roots
+            cluster_roots.append(new_node)
+            
+            #add new_node to set of nodes
+            nodes.append(new_node)
+            count += 1
+        #combine last two clusters
+        k = cluster_roots[0]
+        m = cluster_roots[1]
+        new_node = Node(index = self.n_nodes)
+        self.n_nodes += 1
+        d1 = .5 * d[(k,m)]
+        new_node.add_child(k,d1)
+        d2 = .5 * d[(k,m)]
+        new_node.add_child(m,d2)
+        nodes.append(new_node)
+        #save the nodes and the root
+        self.nodes = nodes
+        #reorder the nodes so the root is 0
+        for i,node in enumerate(nodes[::-1]):
+            node.index = i
+        self.root = new_node
+        
+            
+            
             
