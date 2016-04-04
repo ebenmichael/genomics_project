@@ -6,12 +6,13 @@ import numpy as np
 import scipy as sp
 import random 
 from sklearn.datasets import make_spd_matrix, make_sparse_spd_matrix
-
+from unionfind import UnionFind
 
 class Node():
     
-    def __init__(self,cov_mat =  None, children = None, parent = None,
-                 data = None, observed = False, index = None):
+    def __init__(self,cov_mat =  None, children = None, parent = None, 
+                 parent_weight = None, data = None, observed = False, 
+                 index = None):
         """Constructor
         Input:
             cov_mat: for unobserved node, covariance matrix representing gene 
@@ -30,6 +31,7 @@ class Node():
         else:
             self.children = children
         self.parent = parent
+        self.parent_weight = parent_weight
         self.observed = observed
         self.data = data
         self.index = index
@@ -45,19 +47,21 @@ class Node():
     def set_children(self, children):
         """Sets children to children"""
         self.children = children
-        
+    
+    def set_parent(self,parent,weight):
+        """Sets the parent and parent_weight"""
+        self.parent = parent
+        self.parent_weight = weight
+    
     def add_child(self,child,weight):
         """Adds a child with weight to children"""
         self.children.append((child,weight))
-        
+    
     def add_children(self,children):
         """Adds children from a list of (child,weight) tuples"""
         for child,weight in children:
             self.add_child(child,weight)
-    
-    def set_parent(self, parent):
-        """Sets the parent"""
-        self.parent = parent
+
         
     def sample(self):
         """Samples covariance matrices according to N(cov_ij,weight) and 
@@ -145,13 +149,15 @@ class PhyloTreeSample():
             root.add_child(child,n)
         #if two children, then build tree recursively 
         else:
-            child1 = Node(parent = root, index = self.n_nodes)
-            self.n_nodes += 1
-            child2 = Node(parent = root, index = self.n_nodes)
-            self.n_nodes += 1
+
             #randomly sample variances from scaled inverse chi squared (df,scale)
+
             d1 = self.scale * self.df * 1 / np.random.chisquare(self.df)
             d2 = self.scale * self.df * 1 / np.random.chisquare(self.df)
+            child1 = Node(parent = root, parent_weight = d1, index = self.n_nodes)
+            self.n_nodes += 1
+            child2 = Node(parent = root, parent_weight = d2, index = self.n_nodes)
+            self.n_nodes += 1
             root.add_children([(child1,d1), (child2,d2)])
             #recursively do the same with children
             self.generate_from_node(child1,p)
@@ -247,14 +253,17 @@ class PhyloTreeFit(PhyloTreeSample):
         #do EM until convergence 
         tol = .0001
         diff = 1
+        i = 0
         while diff > tol:
+            print(i)
+            i +=0
             #fit the ancestors based on given branch lengths and topologies
             self.fit_ancestors()
             #fit the branch_lengths between all internal nodes and all 
             #internal nodes to leaf nodes
-            self.fit_branch_lengths()
+            b_lengths = self.fit_branch_lengths()
             #make a minimum spanning tree
-            self.mst()
+            self.mst(b_lengths)
             
     def neighbor_join(self, X):
         """Uses neighbor joining algorithm to make a phylogenic tree used 
@@ -270,10 +279,15 @@ class PhyloTreeFit(PhyloTreeSample):
         
         nodes = [Node(index = i) for i in range(n_tissues)]
         #add observed nodes below the nodes
+        observed_nodes = []
         for i,node in enumerate(nodes):
-            obs_node = Node(data = X[i], observed = True, parent = node)
+            #compute sample covaraince
+            S = np.cov(X[i].T)
+            obs_node = Node(data = X[i], observed = True, parent = node, 
+                            index = node.index, cov_mat = S)
             node.add_child(obs_node, X[i].shape[0])
-            
+            observed_nodes.append(obs_node)
+        self.observed_nodes = observed_nodes
         self.n_nodes = len(nodes)
         #keep track of roots of each cluster
         cluster_roots = [node for node in nodes]
@@ -285,7 +299,6 @@ class PhyloTreeFit(PhyloTreeSample):
                 d[(node1,node2)] = np.linalg.norm(avgs[node1.index] - 
                                                         avgs[node2.index])
         r = dict()
-        count = 0
         while len(cluster_roots) > 2:
             #calculate r[k] for each cluster k
             for cluster1 in cluster_roots:
@@ -326,14 +339,16 @@ class PhyloTreeFit(PhyloTreeSample):
             new_node.add_child(k,d1)
             d2 = .5 * (d[(k,m)] + r[m] - r[k])
             new_node.add_child(m,d2)
-            k.parent = new_node
-            m.parent = new_node
             #add new_node to cluster roots
             cluster_roots.append(new_node)
             
             #add new_node to set of nodes
             nodes.append(new_node)
-            count += 1
+            #assign parent to the nodes
+            i = nodes.index(k)
+            nodes[i].set_parent(new_node,d1)
+            j = nodes.index(m)
+            nodes[j].set_parent(new_node,d2)
         #combine last two clusters
         k = cluster_roots[0]
         m = cluster_roots[1]
@@ -344,6 +359,13 @@ class PhyloTreeFit(PhyloTreeSample):
         d2 = .5 * d[(k,m)]
         new_node.add_child(m,d2)
         nodes.append(new_node)
+        
+        #assign parent to the nodes
+        i = nodes.index(k)
+        nodes[i].set_parent(new_node, d1)
+        j = nodes.index(m)
+        nodes[j].set_parent(new_node, d2)
+        
         #save the nodes and the root
         self.nodes = nodes
         #reorder the nodes so the root is 0
@@ -351,6 +373,178 @@ class PhyloTreeFit(PhyloTreeSample):
             node.index = i
         self.root = new_node
         
+        self.normalize_branch_lengths()
+        
+    def normalize_branch_lengths(self):
+        """Find min and max branch lengths with bfs and normalize all lengths 
+            so there are no negative branch lengths"""
+        q1 = [self.root]
+        q2 = []
+        finished = False
+        min_d = float('inf')
+        max_d = float('-inf')
+        #pass through once to find max and min
+        while not finished:
+            node = q1.pop()
+            if len(node.children) != 1:
+                #add children to lower level queue and chekc branch lengths
+                for child,weight in node.children:
+                    q2.insert(0,child)
+                    if weight > max_d:
+                        max_d = weight
+                    if weight < min_d:
+                        min_d = weight
+            #if upper level queue is empty, switch to lower level queue
+            if len(q1) == 0:
+                if len(q2) != 0:
+                    q1 = q2
+                    q2 = []
+                else:
+                    finished = True  
+         #pass through a second time to reweight the branch lengths to be postive
+        #decrease the minimum a bit to avoid zero length trees 
+        min_d -= .1 * (max_d - min_d)
+        q1 = [self.root]
+        q2 = []
+        finished = False
+        #pass through once to find max and min
+        while not finished:
+            node = q1.pop()
+            if len(node.children) != 1:
+                #add children to lower level queue and change branch lengths
+                for i in range(len(node.children)):
+                    child = node.children[i][0]
+                    #update weight
+                    weight = node.children[i][1]
+                    weight = (weight - min_d) / (max_d - min_d)
+                    node.children[i] = (child,weight)
+                    q2.insert(0,child)
+            #if upper level queue is empty, switch to lower level queue
+            if len(q1) == 0:
+                if len(q2) != 0:
+                    q1 = q2
+                    q2 = []
+                else:
+                    finished = True         
+        
+        
             
+    def fit_ancestors(self):
+        """Find max likelihood ancestors, solves a system of linear equations"""
+        #formula A * nodes = y
+        #matrix A for inversion
+        A = np.zeros((self.n_nodes,self.n_nodes))
+        #fill in A
+        for node in self.nodes:
+            row = node.index          
+            #internal node
+            if len(node.children) > 1:
+                #root node
+                if node.parent == None :
+                    c1 = node.children[0][0]
+                    d1 = node.children[0][1]
+                    c2 = node.children[1][0]
+                    d2 = node.children[1][1]
+                    c1_ind = c1.index
+                    c2_ind = c2.index                
+                    A[row,c1_ind] = 1 / d1
+                    A[row,c2_ind] = 1 / d2
+                    A[row,row] = -(1 / d1 + 1 / d2)
+                    continue
+                c1 = node.children[0][0]
+                d1 = node.children[0][1]
+                c2 = node.children[1][0]
+                d2 = node.children[1][1]
+                p = node.parent
+                dp = node.parent_weight
+                c1_ind = c1.index
+                c2_ind = c2.index
+                p_ind = p.index
+                A[row,c1_ind] = 1 / d1
+                A[row, c2_ind] = 1 / d2
+                A[row, p_ind] = 1 / dp
+                A[row,row] = -(1/d1 + 1/d2 + 1/dp)
+            #leaf node
+            else:
+                #number of samples
+                n = node.children[0][1]
+                p = node.parent
+                #print(node)
+                #print(node.parent)
+                dp = node.parent_weight
+                p_ind = p.index
+                A[row,p_ind] = n / 2 * (1 / dp)
+                A[row,row] = -n / 2 * (1 / dp + n / 2)
+        #invert matrix
+        A_inv = np.linalg.inv(A)
+        #get covariance estimates
+        for k in range(len(self.nodes)):
+            i  = self.nodes[k].index
+            dim = self.observed_nodes[0].data.shape[1]
+            cov_est = np.zeros((dim,dim))
+            #loop over the observed nodes and add with weights
+            for obs_node in self.observed_nodes:
+                j= obs_node.index
+                cov_est += A_inv[i,j] * obs_node.cov_mat
+            #update the estimate of the covariance matrix
+            self.nodes[k].cov_mat = cov_est
             
+    def fit_branch_lengths(self):
+        """Fits the branch lengths given the covariance matrices 
+        Output:
+            b_lengths: dictionary with keys (node,node) and values branch length
+        """
+        #collect leaves and ancestors
+        self.collect_leaves()
+        leaves = set(self.leaves)
+        nodes = set(self.nodes)
+        ancestors = nodes.difference(leaves)
+        
+        #estimate branch lengths
+        b_lengths = {}
+        for ancestor in ancestors:
+            for node in nodes:
+                #estimate variance
+                ca = ancestor.cov_mat
+                cn = node.cov_mat
+                var = np.power(cn - ca,2).mean()
+                #add the varaince as the estimated branch length
+                b_lengths[(ancestor,node)] = var
+        return(b_lengths)
+        
+    def mst(self,b_lengths):
+        """Kruskal's algorithm for minimum spanning tree 
+        Input:
+            b_lengths: dictionary with keys (node,node) and values branch length
+        """
+        #go through all the nodes and get rid of parent/child relationships
+        #so we can build the tree again
+        #except keep leaf nodes and observed data
+        for i in range(len(self.nodes)):
+            if len(self.nodes[i].children) > 1:
+                self.nodes[i].parent = None
+                self.nodes[i].parent_weight = None
+                self.nodes[i].children = []
+            else:
+                print(self.nodes[i])
+                self.nodes[i].parent = None
+                self.nodes[i].parent_weight = None                
+            
+        #unionfind object
+        d_set = UnionFind()
+        #sort the edges into non-decreasing order
+        edges = [(edge,weight) for edge,weight in 
+                    sorted(b_lengths.items(),key = lambda x: x[1])]
+        for edge,weight in edges:
+            u,v = edge
+            if d_set[u] != d_set[v]:
+                d_set.union(u,v)
+                #add parents and children. u is v's parent
+                u_idx = self.nodes.index(u)
+                v_idx = self.nodes.index(v)
+                self.nodes[u_idx].add_child(v,weight)
+                self.nodes[v_idx].set_parent(u,weight)
+            
+                
+        
             
