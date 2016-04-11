@@ -137,6 +137,8 @@ class PhyloTreeSample():
         
     def generate_from_node(self,root,p):
         """Recursive function for generating a tree"""
+
+            
         #sample over Uniform(0,1)
         u = random.random()
         #number of children is 1 with probability p
@@ -256,7 +258,7 @@ class PhyloTreeFit(PhyloTreeSample):
         i = 0
         while diff > tol:
             print(i)
-            i +=0
+            i += 1
             #fit the ancestors based on given branch lengths and topologies
             self.fit_ancestors()
             #fit the branch_lengths between all internal nodes and all 
@@ -264,6 +266,8 @@ class PhyloTreeFit(PhyloTreeSample):
             b_lengths = self.fit_branch_lengths()
             #make a minimum spanning tree
             self.mst(b_lengths)
+            #go from mst to bifurcating tree
+            self.to_bifurcating_tree()
             
     def neighbor_join(self, X):
         """Uses neighbor joining algorithm to make a phylogenic tree used 
@@ -469,8 +473,6 @@ class PhyloTreeFit(PhyloTreeSample):
                 #number of samples
                 n = node.children[0][1]
                 p = node.parent
-                #print(node)
-                #print(node.parent)
                 dp = node.parent_weight
                 p_ind = p.index
                 A[row,p_ind] = n / 2 * (1 / dp)
@@ -526,7 +528,6 @@ class PhyloTreeFit(PhyloTreeSample):
                 self.nodes[i].parent_weight = None
                 self.nodes[i].children = []
             else:
-                print(self.nodes[i])
                 self.nodes[i].parent = None
                 self.nodes[i].parent_weight = None                
             
@@ -545,6 +546,114 @@ class PhyloTreeFit(PhyloTreeSample):
                 self.nodes[u_idx].add_child(v,weight)
                 self.nodes[v_idx].set_parent(u,weight)
             
-                
+    
+    def to_bifurcating_tree(self):
+        """Use Propositions 5.3 and 5.4 in ALGORITHM FOR PHYLOGENETIC 
+            INTERFERENCE (Friedman, et. al.) to go from a MST to a bifurcating
+            tree of (approximately) equal likelihood. Updates nodes with bfs"""
+        #keep track of number of unused nodes
+        self.n_unused = 0
+        q1 = [self.root]
+        q2 = []
+        finished = False
+        #keep a list of available indices
+        idxs = []
+        while not finished:
+            node = q1.pop()
+            #if the degree is 1 (Proposition 5.3)
+            if len(node.children) == 0:
+                #remove the node
+                node.parent.children.remove((node,node.parent_weight))
+                self.nodes.remove(node)
+                idxs.append(node.index)
+            #if the degree is 2 (Proposition 5.3)
+            elif len(node.children) == 1:
+                #either the node is a parent of an observed node, in which case
+                #do nothing
+                #otherwise remove the node
+                if not node.children[0][0].observed:
+                    #remove this node
+                    node.parent.children.remove((node,node.parent_weight))
+                    #add a branch from the child node to the parent node
+                    node.parent.add_child(node.children[0][0],
+                                          node.children[0][1] + 
+                                          node.parent_weight)
+                    #add a branch from the child to the new parent
+                    node.children[0][0].parent = node.parent
+                    node.children[0][0].parent_weight = node.children[0][1] + node.parent_weight
+                    #remove the node from the list of nodes
+                    self.nodes.remove(node)
+                    idxs.append(node.index)
+                    #add the child node to the lower level queue
+                    q2.insert(0,node.children[0][0])
+                    #if the node was the root, make the child the root
+                    if self.root == node:
+                        self.root = node.children[0][0]
+            #if the degree is greater than 3 (Proposition 5.4)
+            elif len(node.children) > 2:
+                #find the two child nodes which are closest together
+                n1 = None
+                n2 = None
+                min_d = float('inf')
+                #all neighbors including parent
+                neighbors = node.children
+                neighbors.append((node.parent,node.parent_weight))
+                for node_1,weight_1 in neighbors:
+                    for node_2, weight_2 in neighbors:
+                        if node_1 != node_2:
+                            dist = np.power(node_1.cov_mat - node_2.cov_mat,2) 
+                            if dist < min_d:
+                                n1 = node_1
+                                n2 = node_2
+                                min_d = dist
+                #create a new node
+                if len(idxs) > 0:
+                    index = idxs.pop()
+                else:
+                    index = self.n_nodes 
+                new_node = Node(index = index)
+                #place the new node a little differently if one of the closest
+                #nodes is a parent
+                if n1 == node.parent or n2 == node.parent:
+                    #assign node to be new_node's parent, use a small weight
+                    new_node.set_parent(node,.0001)
+                    #give the rest of the children to new_node
+                    for child,weight in node.children:
+                        if child != n1 and child != n2:
+                            new_node.add_child(child,weight)
+                    #assign new node as a child
+                    node.add_child(new_node,.0001) 
+                    #add children to lower level queue
+                    for child,weight in node.children:
+                        q2.insert(0,child)
+                else:
+                    #assign node's parent to be new_node's parent
+                    new_node.set_parent(node.parent,node.parent_weight)
+                    #assign new_node to be node's parent
+                    node.set_parent(new_node,.0001)
+                    #if node is the root then made new_node the root
+                    if self.root == node:
+                        self.root == new_node
+                    #add the rest of the children to be new_node's children
+                    for child,weight in node.children:
+                        if child != n1 and child != n2:
+                            new_node.add_child(child,weight)
+                    #add new_node to current queue
+                    q1.insert(0,new_node)
+                #add new_node to list of nodes
+                self.nodes.append(new_node)
+            #if the node has two children, just add the children to the lower
+            #queue and continue
+            else:
+                for child,weight in node.children:
+                    q2.insert(0,child)
+            #if upper level queue is empty, switch to lower level queue
+            if len(q1) == 0:
+                if len(q2) != 0:
+                    q1 = q2
+                    q2 = []
+                else:
+                    finished = True         
+             
         
             
