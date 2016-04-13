@@ -7,6 +7,7 @@ import scipy as sp
 import random 
 from sklearn.datasets import make_spd_matrix, make_sparse_spd_matrix
 from unionfind import UnionFind
+from collections import Counter, defaultdict
 
 class Node():
     
@@ -263,9 +264,9 @@ class PhyloTreeFit(PhyloTreeSample):
             self.fit_ancestors()
             #fit the branch_lengths between all internal nodes and all 
             #internal nodes to leaf nodes
-            b_lengths = self.fit_branch_lengths()
+            b_lengths, weights = self.fit_branch_lengths()
             #make a minimum spanning tree
-            self.mst(b_lengths)
+            self.mst(b_lengths, weights)
             #go from mst to bifurcating tree
             self.to_bifurcating_tree()
             
@@ -495,29 +496,39 @@ class PhyloTreeFit(PhyloTreeSample):
         """Fits the branch lengths given the covariance matrices 
         Output:
             b_lengths: dictionary with keys (node,node) and values branch length
+            weights: dictionary maps (node,node) to negative log likelihood
         """
         #collect leaves and ancestors
         self.collect_leaves()
         leaves = set(self.leaves)
         nodes = set(self.nodes)
         ancestors = nodes.difference(leaves)
-        
         #estimate branch lengths
         b_lengths = {}
+        weights = {}
         for ancestor in ancestors:
             for node in nodes:
-                #estimate variance
-                ca = ancestor.cov_mat
-                cn = node.cov_mat
-                var = np.power(cn - ca,2).mean()
-                #add the varaince as the estimated branch length
-                b_lengths[(ancestor,node)] = var
-        return(b_lengths)
+                if node != ancestor and not (ancestor,node) in weights:
+                    #estimate variance
+                    ca = ancestor.cov_mat
+                    cn = node.cov_mat
+                    n = ca.shape[0] ** 2
+                    var = np.power(cn - ca,2).mean()
+                    #add the varaince as the estimated branch length
+                    b_lengths[(ancestor,node)] = var
+                    #add negative log likelihood
+                    weights[(ancestor,node)] = np.log(2 * np.pi) + 2 * np.log(var) \
+                                                + n / 2
+        return(b_lengths,weights)
         
-    def mst(self,b_lengths):
+    def mst(self,b_lengths, weights):
         """Kruskal's algorithm for minimum spanning tree 
         Input:
             b_lengths: dictionary with keys (node,node) and values branch length
+            weights: dictionary maps (node,node) to negative log likelihood
+        Output:
+            adj_list: adjacency list as a dictionary which maps nodes to lists
+                        of node,weight tuples representing edges
         """
         #go through all the nodes and get rid of parent/child relationships
         #so we can build the tree again
@@ -535,17 +546,18 @@ class PhyloTreeFit(PhyloTreeSample):
         d_set = UnionFind()
         #sort the edges into non-decreasing order
         edges = [(edge,weight) for edge,weight in 
-                    sorted(b_lengths.items(),key = lambda x: x[1])]
+                    sorted(weights.items(),key = lambda x: x[1])]
+        #keep track of new graph as an adjacency matrix
+        adj_mat = {}
         for edge,weight in edges:
             u,v = edge
             if d_set[u] != d_set[v]:
                 d_set.union(u,v)
-                #add parents and children. u is v's parent
-                u_idx = self.nodes.index(u)
-                v_idx = self.nodes.index(v)
-                self.nodes[u_idx].add_child(v,weight)
-                self.nodes[v_idx].set_parent(u,weight)
-            
+                #update adjacency matrix
+                adj_mat[(u,v)] = b_lengths[(u,v)]
+                adj_mat[(v,u)] = b_lengths[(u,v)]
+
+        return(adj_mat)    
     
     def to_bifurcating_tree(self):
         """Use Propositions 5.3 and 5.4 in ALGORITHM FOR PHYLOGENETIC 
@@ -654,6 +666,84 @@ class PhyloTreeFit(PhyloTreeSample):
                     q2 = []
                 else:
                     finished = True         
-             
+    def to_bifurcating_tree_tmp(self,adj_mat):
         
+        #get number of neighbors for each node
+        degree = Counter(edge[0] for edge in adj_mat)
+        #go through all the nodes
+        stack = list(self.nodes)
+        #keep a list of available indices
+        idxs = []        
+        while len(stack) > 0:
+            node = stack.pop()
+            #if the node has degree 1 and is not the parent of an observed node
+            #remove the node (Proposition 5.3)
+            if degree[node] == 1 and len(node.children) == 0:
+                #remove the node from list of nodes
+                self.nodes.remove(node)
+                idxs.append(node.index)
+                #remove the node from the adjecencey matrix
+                adj_mat = {edge:weight for edge,weight in adj_mat.items() \
+                            if not node in edge}
+                                
+            #if the node has degree 2 remove it
+            elif degree[node] == 2:
+                #remove the node from the list of nodes
+                self.nodes.remove(node)
+                idxs.append(node.index)
+                #combine the edges (u,node) and (node,v) and remove node from 
+                #adj matrix
+                tmp = {}
+                new_edge = []
+                for edge,weight in adj_mat.items():
+                    if node in edge:
+                        if edge[0] == node:
+                            u = edge[1]
+                            if not u in new_edge:
+                                new_edge.append(u)
+                    else:
+                        tmp[edge] = weight
+                #to tuple so can hash
+                new_edge = tuple(new_edge)
+                u,v = new_edge
+                tmp[new_edge] = adj_mat[(u,node)] + adj_mat[(node,v)]
+                tmp[new_edge[::-1]] = tmp[new_edge]
+                adj_mat = tmp
+                
+            #if the degree is greater than 3 (Proposition 5.4)
+            elif degree[node] > 3:
+                #find the two neighbors which are closest together and group them
+                neighbors = [edge[1] for edge in adj_mat if edge[0] == node]
+                closest = (None,None)
+                d_min = float('inf')
+                for n1 in neighbors:
+                    for n2 in neighbors:
+                        dist = np.power(n1.cov_mat - n2.cov_mat,2)   
+                        if dist < d_min:
+                            closest = (n1,n2)
+                            d_min = dist
+                #create a new node
+                #use an unused index if there is one
+                if len(idxs) > 0:
+                    idx = idxs.pop()
+                else:
+                    idx = self.n_nodes
+                new_node = Node(index = idx)
+                new_node.cov_mat = np.copy(node.cov_mat)
+                #update edges 
+                for n in neighbors:
+                    #keep the closest 2 neighbors with node, rest go to new_node
+                    if n not in closest:
+                        #add edge (n,new_node) and (new_node,n)
+                        adj_mat[(n, new_node)] = adj_mat[(n,node)]
+                        adj_mat[(new_node, n)] = adj_mat[(node, n)]
+                        #remove the edges (node,n) and (n,node) from adj mat
+                        del adj_mat[(n,node)]
+                        del adj_mat[(node, n)]
+                #add an edge between node and new_node
+                adj_mat[(node, new_node)] = .0001
+                adj_mat[(new_node, node)] = .0001
+                #add new_node and all neighbors into the stack
+                stack.append(new_node)
+                stack.extend(neighbors)
             
