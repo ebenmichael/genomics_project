@@ -254,26 +254,59 @@ class PhyloTreeFit(PhyloTreeSample):
         """
         #first initialize the topology by using neighbor joining
         self.neighbor_join(X)
+        self.collect_leaves()
         #do EM until convergence 
         tol = .0001
         diff = 1
         i = 0
+        #store previous covarainces
+        prev_covs = {}
         while diff > tol:
+            #print("NEXT ITERATION")
             print(i,diff)
-            i += 1
+            
+            for node in self.leaves:
+                prev_covs[node] = np.copy(node.cov_mat)
+            
             #fit the ancestors based on given branch lengths and topologies
             self.fit_ancestors()
             #fit the branch_lengths between all internal nodes and all 
             #internal nodes to leaf nodes
             b_lengths, weights = self.fit_branch_lengths()
+            
+            #calulcate likelihood
+            added = defaultdict(bool)
+            log_lik = 0
+            for edge,weight in weights.items():
+                if not added[edge] or not added[edge[::-1]]:
+                    log_lik -= weight
+                    added[edge] = True
+                    added[edge[::-1]] = True
+            print(log_lik)
             #make a minimum spanning tree
             adj_mat = self.mst(b_lengths, weights)
             #go from mst to bifurcating tree
             adj_mat = self.to_bifurcating_tree(adj_mat)
+            #print(adj_mat)
             #make a directed phylogeny from adj_mat
             self.to_directed_phylogeny(adj_mat)
             #calculate differences between all covariance matrices
-            
+            if i != 0:
+                diff = 0
+                #print(prev_log_lik,log_lik)
+                
+                for node in self.leaves:
+                    c_prev = prev_covs[node]
+                    c_pres = node.cov_mat
+                    #print(c_prev)
+                    #print(c_pres)
+                    diff += np.sum(np.power(c_pres - c_prev,2))
+                
+                #diff = log_lik - prev_log_lik
+                #prev_log_lik = log_lik
+            #else:
+                #prev_log_lik = log_lik
+            i += 1
     def neighbor_join(self, X):
         """Uses neighbor joining algorithm to make a phylogenic tree used 
             as initialization
@@ -474,8 +507,8 @@ class PhyloTreeFit(PhyloTreeSample):
                 A[row,p_ind] = n / 2 * (1 / dp)
                 A[row,row] = -n / 2 * (1 / dp + n / 2)
         #invert matrix
-        print(A)
-        A_inv = np.linalg.inv(A)
+        #print(A)
+        A_inv = np.linalg.pinv(A)
         #get covariance estimates
         for k in range(len(self.nodes)):
             i  = self.nodes[k].index
@@ -569,19 +602,31 @@ class PhyloTreeFit(PhyloTreeSample):
         #get number of neighbors for each node
         degree = Counter(edge[0] for edge in adj_mat)
         #go through all the nodes
+        #print(self.nodes)
         stack = list(self.nodes)
         #keep a list of available indices
         idxs = []        
         while len(stack) > 0:
-            
+            #print("AAAAAAAAAAAAAAA")
+            #print(stack)
             node = stack.pop()
+            #print(node,degree[node])
+            #print(adj_mat)
             #if the node has degree 1 and is not the parent of an observed node
             #remove the node (Proposition 5.3)
             if degree[node] == 1 and len(node.children) == 0:
                 #remove the node from list of nodes
                 self.nodes.remove(node)
                 idxs.append(node.index)
-                #remove the node from the adjecencey matrix
+                #remove the node from the adjecencey matrix and decrease degree
+                #of neighbor
+                tmp = {}
+                for edge, weight in adj_mat.items():
+                    if not node in edge:
+                        tmp[edge] = weight
+                    else:
+                        if node == edge[0]:
+                            degree[edge[1]] -= 1
                 adj_mat = {edge:weight for edge,weight in adj_mat.items() \
                             if not node in edge}
                                 
@@ -618,10 +663,11 @@ class PhyloTreeFit(PhyloTreeSample):
                 d_min = float('inf')
                 for n1 in neighbors:
                     for n2 in neighbors:
-                        dist = np.sum(np.power(n1.cov_mat - n2.cov_mat,2)) 
-                        if dist < d_min:
-                            closest = (n1,n2)
-                            d_min = dist
+                        if n1 != n2:
+                            dist = np.sum(np.power(n1.cov_mat - n2.cov_mat,2)) 
+                            if dist < d_min:
+                                closest = (n1,n2)
+                                d_min = dist
                 #create a new node
                 #use an unused index if there is one
                 if len(idxs) > 0:
@@ -631,6 +677,8 @@ class PhyloTreeFit(PhyloTreeSample):
                 new_node = Node(index = idx)
                 new_node.cov_mat = np.copy(node.cov_mat)
                 #update edges 
+                
+                #print(closest)
                 for n in neighbors:
                     #keep the closest 2 neighbors with node, rest go to new_node
                     if n not in closest:
@@ -643,6 +691,8 @@ class PhyloTreeFit(PhyloTreeSample):
                 #add an edge between node and new_node
                 adj_mat[(node, new_node)] = .0001
                 adj_mat[(new_node, node)] = .0001
+                #print("-------------------")
+                #print(adj_mat)
                 #add new_node and all neighbors not already in the stack
                 #into the stack
                 stack.append(new_node)
@@ -651,10 +701,14 @@ class PhyloTreeFit(PhyloTreeSample):
                         stack.append(n)
                 #add new_node to the list of nodes
                 self.nodes.append(new_node)
-                #change the degrees
+                #change the degrees depending on which is the parent
                 degree[new_node] = degree[node]  - 1
                 degree[node] = 3
-            
+            #print(self.nodes)
+        #renumber the nodes
+        for i,node in enumerate(self.nodes):
+            if node.index == self.n_nodes:
+                self.nodes[i].index = idxs[0]
         return(adj_mat)
         
         
@@ -667,6 +721,8 @@ class PhyloTreeFit(PhyloTreeSample):
         """
         #get number of neighbors for each node
         degree = Counter(edge[0] for edge in adj_mat)
+        #print(adj_mat)
+        #print(degree)
         #find a node with degree 3
         idx = len(self.nodes) - 1
         while degree[self.nodes[idx]] != 3:
