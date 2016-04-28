@@ -8,6 +8,7 @@ import random
 from sklearn.datasets import make_spd_matrix, make_sparse_spd_matrix
 from unionfind import UnionFind
 from collections import Counter, defaultdict
+import pprint as pp
 
 class Node():
     
@@ -452,7 +453,7 @@ class PhyloTreeFit(PhyloTreeSample):
         q1 = [self.root]
         q2 = []
         finished = False
-        #pass through once to find max and min
+        #pass through to normalize the lengths
         while not finished:
             node = q1.pop()
             if len(node.children) != 1:
@@ -463,6 +464,8 @@ class PhyloTreeFit(PhyloTreeSample):
                     weight = node.children[i][1]
                     weight = (weight - min_d) / (max_d - min_d)
                     node.children[i] = (child,weight)
+                    child.parent = node
+                    child.parent_weight = weight
                     q2.insert(0,child)
             #if upper level queue is empty, switch to lower level queue
             if len(q1) == 0:
@@ -499,9 +502,18 @@ class PhyloTreeFit(PhyloTreeSample):
                     A[row, p_ind] = 1 / dp
                     A[row,row] = -(1/d1 + 1/d2 + 1/dp)
                 else:
-                    A[row,c1_ind] = 1 / d1
-                    A[row, c2_ind] = 1 / d2
-                    A[row,row] = -(1/d1 + 1/d2)                    
+                    if len(node.children) == 2:
+                        A[row,c1_ind] = 1 / d1
+                        A[row, c2_ind] = 1 / d2
+                        A[row,row] = -(1/d1 + 1/d2)   
+                    else:
+                        c3 = node.children[2][0]
+                        d3 = node.children[2][1]
+                        c3_ind = c3.index
+                        A[row,c1_ind] = 1 / d1
+                        A[row, c2_ind] = 1 / d2
+                        A[row, c3_ind] = 1 / d3
+                        A[row,row] = -(1/d1 + 1/d2 + 1/d3)                           
             #leaf node
             else:
                 #number of samples
@@ -509,10 +521,13 @@ class PhyloTreeFit(PhyloTreeSample):
                 p = node.parent
                 dp = node.parent_weight
                 p_ind = p.index
-                A[row,p_ind] = n / 2 * (1 / dp)
-                A[row,row] = -n / 2 * (1 / dp + n / 2)
+                A[row,p_ind] = 2/n * (1 / dp)
+                A[row,row] = -(2 / (n *dp) + 1)
         #invert matrix
+        A = -A
         A_inv = np.linalg.pinv(A)
+        #print(A)
+        #print(A_inv)
         #get covariance estimates
         for k in range(len(self.nodes)):
             i  = self.nodes[k].index
@@ -524,7 +539,8 @@ class PhyloTreeFit(PhyloTreeSample):
                 cov_est += A_inv[i,j] * obs_node.cov_mat
             #update the estimate of the covariance matrix
             self.nodes[k].cov_mat = cov_est
-            
+        
+        return(A,A_inv)
             
     def fit_branch_lengths(self):
         """Fits the branch lengths given the covariance matrices 
@@ -741,9 +757,11 @@ class PhyloTreeFit(PhyloTreeSample):
                 degree[new_node] = degree[node]  - 1
                 degree[node] = 3
         #renumber the nodes
+        curr_idx = len(self.leaves)
         for i,node in enumerate(self.nodes):
-            if node.index >= self.n_nodes - 1:
-                self.nodes[i].index = idxs.pop()
+            if not node in self.leaves:
+                node.index = curr_idx
+                curr_idx += 1
         return(adj_mat)
         
         
@@ -765,6 +783,7 @@ class PhyloTreeFit(PhyloTreeSample):
         adj_list = defaultdict(list)
         for edge in adj_mat:
             adj_list[edge[0]].append(edge[1])
+        pp.pprint(adj_list)
         #assign root as the degree 3 node chosen
         self.root = self.nodes[idx]
         q1 = [self.root]
@@ -772,7 +791,8 @@ class PhyloTreeFit(PhyloTreeSample):
         checked = defaultdict(bool)
         
         while len(q1) != 0:
-
+            print(q1)
+            print(q2)
             node = q1.pop()
             if checked[node]:
                 continue
