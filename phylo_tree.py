@@ -429,7 +429,7 @@ class PhyloTreeFit(PhyloTreeSample):
                     diff += np.sum(np.power(c_pres - c_prev,2))
                 
                 
-                #diff = log_lik - prev_log_lik
+                #diff = np.abs(log_lik - prev_log_lik)
                 #prev_log_lik = log_lik
             #else:
                 #prev_log_lik = log_lik
