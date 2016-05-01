@@ -81,7 +81,7 @@ class Node():
                         p_ij = self.cov_mat[i,j] #parent value
                         #sample from normal distribution around parent value
                         sample[i,j] = np.random.normal(p_ij,
-                                                        weight * np.abs(p_ij)
+                                                        weight**2 * p_ij**2
                                                         ,1)
                 #go from upper triangular to symmetric
                 s = sample + sample.T
@@ -152,8 +152,10 @@ class PhyloTreeSample():
         n_child = 1 + int(u > p)
         #if one child, then make that child an observed node with no children
         #or if there are too many nodes
-        #if the node is the root, guarantee that it is not a child node
-        if (n_child == 1 or self.n_nodes > self._max_nodes) and root != self.root:
+        #if the node is the root, or its parent is a root, guarantee that it is
+        #not a child node
+        if (n_child == 1 or self.n_nodes > self._max_nodes) and \
+                           not (root == self.root or root.parent == self.root):
             child = Node(parent = root, observed = True, index = root.index)
             #randomly sample a number of data elements
             n = random.randint(10,100)
@@ -202,18 +204,17 @@ class PhyloTreeSample():
         """samples recursively, returns data"""
         self.root.sample()
         return(self.get_data())
-        
-    def collect_leaves(self):
-        """Collect all leaf nodes (above observed nodes) with BFS"""
+
+    def collect_nodes(self):
+        """Collect all nodes with BFS"""
         q1 = [self.root]
         q2 = []
         finished = False
-        self.leaves = []
+        self.nodes = []
         while not finished:
             node = q1.pop()
-            if len(node.children) == 1:
-                self.leaves.append(node)
-            else:
+            self.nodes.append(node)
+            if len(node.children) > 1:
                 #add children to lower level queue
                 for child,weight in node.children:
                     q2.insert(0,child)
@@ -223,7 +224,14 @@ class PhyloTreeSample():
                     q1 = q2
                     q2 = []
                 else:
-                    finished = True         
+                    finished = True      
+
+        
+    def collect_leaves(self):
+        """Collect all leaf nodes by collecting all nodes"""
+
+        self.collect_nodes()
+        self.leaves = [node for node in self.nodes if len(node.children) == 1]
         
         
     def get_data(self):
@@ -237,7 +245,28 @@ class PhyloTreeSample():
             data.append(leaf.children[0][0].data)
         
         return(data)
+    
+    def to_adj_mat(self):
+        """Returns the tree as an adjacency matrix"""
+        #collect nodes if haven't already
+        if self.nodes == None:
+            self.collect_nodes()
+        n = self.n_nodes
+        adj_matrix = np.zeros((n,n))
+        for node in self.nodes:
+            #add weights for children
+            i = node.index
+            child_array = node.children #(node, float) list
+            for child in child_array:
+                j = child[0].index
+                adj_matrix[i][j] = child[1]
+            #add weight for parent if not the root
+            if node != self.root:
+                j = node.parent.index
+                adj_matrix[i][j] = node.parent_weight 
         
+        return(adj_matrix)
+    
     def __repr__(self):
         return(self.__str__())
         
@@ -253,6 +282,99 @@ class PhyloTreeFit(PhyloTreeSample):
         self.nodes = []
         self.weights = []
         self.n_nodes = 0
+
+    
+    #scoring
+    def score_tree(self,other):
+        """Uses eigenvalues to give a difference scoring between 0 and inf"""
+
+        ##adjacency matrics
+        #self/fitted tree
+        adj_matrix = (self.to_adj_mat() != 0) * 1
+        #original tree
+        adj_matrix_original = (other.to_adj_mat() != 0)*1
+
+
+        ##diagonal degree matrics (sum of column)
+        #self/fitted tree
+        deg_matrix = adj_matrix.sum(0)
+        #original tree
+        deg_matrix_original = adj_matrix_original.sum(0)
+
+        #find laplacian matrix of each graph (l = d-a)
+        laplacian_fitted = np.subtract(deg_matrix, adj_matrix)
+        laplacian_original = np.subtract(deg_matrix_original,
+                                         adj_matrix_original)
+
+        #find eigenvalues of laplacian matrices
+        eigvals_fitted = np.sort(np.linalg.eigvals(laplacian_fitted))
+        eigvals_original = np.sort(np.linalg.eigvals(laplacian_original))
+
+        #calculate similarity score
+        #if there is one less node in self then only consider the ones in self
+        if len(eigvals_fitted) == len(eigvals_original) - 1:
+            sims = (np.subtract(eigvals_fitted, eigvals_original[:-1]))**2
+        else:
+            sims = (np.subtract(eigvals_fitted, eigvals_original))**2
+        sim_score = np.sum(sims)
+
+        return(sim_score)
+
+
+    
+
+    def score_leaves(self, other):
+        '''compare similarity of leaves of trees'
+            Input:
+                other: real tree
+            Output:
+                (fitted tree score, sample covariance score)
+        '''
+        #collect leaves if they haven't been collected yet
+        self.collect_leaves()
+        other.collect_leaves()
+            
+        def covariance_similarity(matrix1, matrix2):
+            '''outputs a similarity score for two square leaf matrices'''
+            diff = np.subtract(matrix1, matrix2)
+            #can use matrix_power here b/c using square matrices
+            diff_sq = np.power(diff,2)
+            mean = diff_sq.mean()
+            return(mean)
+            
+            
+        error = {} #error between fitted cov and real cov
+        sample_error = {} #error between sample covariance and real cov
+        fit_to_real = {} #maps fitted nodes to their real counterparts
+        #find list of leaf nodes per tree
+        nodes1 = self.leaves
+        nodes2 = other.leaves
+        #find corresponding nodes between trees
+        for i in nodes1:
+            #obersved node
+            i_data = i.children[0][0].data
+            for j in nodes2:
+                j_data = j.children[0][0].data
+                #check if corresponding leaves
+                if np.all(i_data == j_data):
+                    fit_to_real[i] = j
+            #calculate average similarity
+            #for each node's covariance matrix
+            sim = covariance_similarity(i.cov_mat, j.cov_mat)
+            #store similarity score as value to start leaf node's index
+            error[i] = sim
+            sample_cov = np.cov(i_data.T)
+            sample_error[i] = covariance_similarity(j.cov_mat,sample_cov)
+                    
+        scores1 = [v for v in error.values()]
+        mean1 = np.mean(scores1)
+    
+        scores2 = [v for v in sample_error.values()]
+        mean2 = np.mean(scores2)
+        #return the average similarity between covariance matrices
+        #return similarity #would return dictionary = similiarity per node pair
+        return(mean1, mean2)
+
         
 
     def fit(self,X):
@@ -264,12 +386,12 @@ class PhyloTreeFit(PhyloTreeSample):
         self.neighbor_join(X)
         self.collect_leaves()
         #do EM until convergence 
-        tol = .0001
+        tol = .01
         diff = 1
         i = 0
         #store previous covarainces
         prev_covs = {}
-        while diff > tol:
+        while diff > tol and i < 50:
             
             for node in self.leaves:
                 prev_covs[node] = np.copy(node.cov_mat)
@@ -305,6 +427,7 @@ class PhyloTreeFit(PhyloTreeSample):
                     #print(c_prev)
                     #print(c_pres)
                     diff += np.sum(np.power(c_pres - c_prev,2))
+                
                 
                 #diff = log_lik - prev_log_lik
                 #prev_log_lik = log_lik
@@ -563,16 +686,26 @@ class PhyloTreeFit(PhyloTreeSample):
                     ca = ancestor.cov_mat
                     cn = node.cov_mat
                     n = ca.shape[0]
-                    eff = 0
+                    
                     v = np.power(cn - ca,2)
+                    
                     eff = v / np.power(ca,2)
-                    eff = eff.mean()
+                    eff = np.sqrt(eff.mean())
                     #add the efficiency as the estimated branch length
                     b_lengths[(ancestor,node)] = eff
                     #add negative log likelihood
                     weights[(ancestor,node)] = (n**2 / 2) * np.log(2 * np.pi) + \
                                                 (n**2/2) *  np.log(v).sum() + \
                                                 n**2 / 2
+                    
+                    """
+                    
+                    v = v.mean()
+                    b_lengths[(ancestor,node)] = v
+                    weights[(ancestor,node)] = (n**2 / 2) * np.log(2 * np.pi) + \
+                                                (n**2/2) *  np.log(v) + \
+                                                n**2 / 2
+                    """
         return(b_lengths,weights)
         
     def mst(self,b_lengths, weights):
@@ -609,8 +742,8 @@ class PhyloTreeFit(PhyloTreeSample):
                 #update adjacency matrix
                 adj_mat[(u,v)] = b_lengths[(u,v)]
                 adj_mat[(v,u)] = b_lengths[(u,v)]
-
-        return(adj_mat)    
+        
+        return(adj_mat)
             
     def to_bifurcating_tree(self,adj_mat):
         """Use Propositions 5.3 and 5.4 in ALGORITHM FOR PHYLOGENETIC 
@@ -627,17 +760,32 @@ class PhyloTreeFit(PhyloTreeSample):
         #get number of neighbors for each node
         degree = Counter(edge[0] for edge in adj_mat)
         #go through all the nodes
-        stack = list(self.nodes)
-        #keep a list of available indices
-        idxs = []        
+        stack = list(self.nodes)        
         while len(stack) > 0:
+            #print(len(self.nodes))
+            #print(stack)
             node = stack.pop()
+
+            #print(node,degree[node],len(node.children))
+            #go from adjacency matrix to egde list
+            adj_list = defaultdict(list)
+            for edge in adj_mat:
+                adj_list[edge[0]].append(edge[1])
+            #pp.pprint(adj_list)    
+            #print(degree)
             #if the node has degree 1 and is not the parent of an observed node
             #remove the node (Proposition 5.3)
             if degree[node] == 1 and len(node.children) == 0:
-                #remove the node from list of nodes
-                self.nodes.remove(node)
-                idxs.append(node.index)
+                #print("REMOVED")
+                #print(node,degree[node],len(node.children))
+                #remove the node from the list of nodes if the node is there
+                if node in self.nodes:
+                    self.nodes.remove(node)
+                #remove node from degree dictionary
+                degree.pop(node,None)
+                #remove the node from the stack if it is in the stack again
+                if node in stack:
+                    stack.remove(node)
                 #remove the node from the adjecencey matrix and decrease degree
                 #of neighbor
                 tmp = {}
@@ -647,16 +795,25 @@ class PhyloTreeFit(PhyloTreeSample):
                     else:
                         if node == edge[0]:
                             degree[edge[1]] -= 1
+                            #add the node which just lost a neighbor back into 
+                            #the stack
+                            stack.append(edge[1])
                 adj_mat = {edge:weight for edge,weight in adj_mat.items() \
                             if not node in edge}
-                                
+
             #if the node has degree 2 and is not the parent of an observed node
             #remove it (Proposition 5.3)
             elif degree[node] == 2 and len(node.children) == 0:
-                
-                #remove the node from the list of nodes
-                self.nodes.remove(node)
-                idxs.append(node.index)
+                #print("REMOVED")
+                #print(node,degree[node],len(node.children))
+                #remove the node from the list of nodes if the node is there
+                if node in self.nodes:
+                    self.nodes.remove(node)
+                #remove node from degree dictionary
+                degree.pop(node,None)
+                #remove the node from the stack if it is in the stack again
+                if node in stack:
+                    stack.remove(node)
                 #combine the edges (u,node) and (node,v) and remove node from 
                 #adj matrix
                 tmp = {}
@@ -677,13 +834,9 @@ class PhyloTreeFit(PhyloTreeSample):
                 adj_mat = tmp
             #if  degree is 2 but the node is the parent of an observed node
             #add a new node (Proposition 5.4)
-            elif degree[node] == 2 and len(node.children) != 0:
+            elif (degree[node] == 2 or degree[node] == 3) and len(node.children) != 0:
                 #create a new node
-                #use an unused index if there is one
-                if len(idxs) > 0:
-                    idx = idxs.pop()
-                else:
-                    idx = self.n_nodes
+                idx = self.n_nodes
                 new_node = Node(index = idx)
                 new_node.cov_mat = np.copy(node.cov_mat)
                 #send node's neighbors to new_node   
@@ -707,9 +860,9 @@ class PhyloTreeFit(PhyloTreeSample):
                 #add new_node to the list of nodes
                 self.nodes.append(new_node)
                 #change the degrees
-                degree[new_node] = 3
+                degree[new_node] = degree[node] + 1
                 degree[node] = 1
-                
+                #print("NEW NODE: " + str(new_node))
             #if the degree is greater than 3 (Proposition 5.4)
             elif degree[node] > 3:
                 #find the two neighbors which are closest together and group them
@@ -724,11 +877,7 @@ class PhyloTreeFit(PhyloTreeSample):
                                 closest = (n1,n2)
                                 d_min = dist
                 #create a new node
-                #use an unused index if there is one
-                if len(idxs) > 0:
-                    idx = idxs.pop()
-                else:
-                    idx = self.n_nodes
+                idx = self.n_nodes
                 new_node = Node(index = idx)
                 new_node.cov_mat = np.copy(node.cov_mat)
                 #update edges 
@@ -756,6 +905,7 @@ class PhyloTreeFit(PhyloTreeSample):
                 #change the degrees
                 degree[new_node] = degree[node]  - 1
                 degree[node] = 3
+                #print("NEW NODE: " + str(new_node))
         #renumber the nodes
         curr_idx = len(self.leaves)
         for i,node in enumerate(self.nodes):
@@ -772,6 +922,7 @@ class PhyloTreeFit(PhyloTreeSample):
             adj_mat: phylogenetic tree as adjacency matrix. 
                         dict (node,node) keys weight values
         """
+
         #get number of neighbors for each node
         degree = Counter(edge[0] for edge in adj_mat)
 
@@ -783,16 +934,41 @@ class PhyloTreeFit(PhyloTreeSample):
         adj_list = defaultdict(list)
         for edge in adj_mat:
             adj_list[edge[0]].append(edge[1])
-        pp.pprint(adj_list)
+        #pp.pprint(adj_list)
         #assign root as the degree 3 node chosen
         self.root = self.nodes[idx]
         q1 = [self.root]
         q2 = []
         checked = defaultdict(bool)
         
+        root = self.root
+        #Add 1 more node to turn bifurcating tree into binary tree
+        new_node = Node(index = len(self.nodes))
+        self.n_nodes +=1 
+        #give new_node 2 of root's children
+        for neighbor in adj_list[root][:-1]:
+            adj_mat[(new_node,neighbor)] = adj_mat[(root,neighbor)]
+            adj_mat[(neighbor,new_node)] = adj_mat[(root,neighbor)]
+            del adj_mat[(root,neighbor)]
+            del adj_mat[(neighbor,root)]
+        #add edge from root to new_node
+        adj_mat[(new_node,root)] = .00001
+        adj_mat[(root,new_node)] = .00001
+        
+        degree[root] -= 1
+        degree[new_node] = 3        
+        
+        #go from adjacency matrix to egde list
+        adj_list = defaultdict(list)
+        for edge in adj_mat:
+            adj_list[edge[0]].append(edge[1])
+            
+        self.nodes.append(new_node)
+        
+        
         while len(q1) != 0:
-            print(q1)
-            print(q2)
+            #print(q1)
+            #print(q2)
             node = q1.pop()
             if checked[node]:
                 continue
@@ -806,7 +982,7 @@ class PhyloTreeFit(PhyloTreeSample):
                 #add parent to upper level queue
                 q2.insert(0,parent)
                 """
-            elif degree[node] == 3:
+            elif degree[node] >= 2:
                 
                 parent = node.parent
                 """
@@ -837,3 +1013,4 @@ class PhyloTreeFit(PhyloTreeSample):
                 if len(q2) != 0:
                     q1 = q2
                     q2 = []
+        self.n_nodes = len(self.nodes)
