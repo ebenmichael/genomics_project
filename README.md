@@ -23,7 +23,6 @@ pt_fit = phylo_tree.PhyloTreeFit()
 pt_fit.fit(dat)
 ```
 
-This uses Python 3.4, and requires NumPy, SciPy, and Scikit-Learn.
 
 ```tester.py``` takes in 2 command line variables, the name of the file to write to and the number of trials to run. 
 Usage:```python tester.py filename n_trials```
@@ -34,3 +33,6 @@ The resulting csv file contains the following information for each trial:
 - cov_score: the mean square error of the co-expression matrices using the algorithm compared to the real co-expression matrices
 - sample_cov_score: the mean square error of the sample covariance for each tissue compared to the real co-expression matrices
 - time: the time to run the algorithm
+
+
+This uses Python 3.4, and requires NumPy, SciPy, and Scikit-Learn.
