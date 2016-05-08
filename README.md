@@ -1,3 +1,16 @@
+# genomics_project 
+Code for inferring gene coexpression networks and phylogeny trees
+
+### Files
+
+- `phylo_tree.py` contains the ```PhyloTreeSample``` class, which generates and samples data from phylogenetic trees, and the ```PhyloTreeFit``` class which infers phylogenetic trees and co-expression networks from tissue gene expression data.
+- ```unionfind.py``` contains the ```UnionFind``` class, an implementation of a disjoint sets data structure. From https://www.ics.uci.edu/~eppstein/PADS/UnionFind.py
+- ```tester.py``` contains a script to generate phylogenetic trees, fit our algorithm and the neighbor joining algorithm, and compare the scores
+- ```figures.py``` contains code to create the figures used in our presentation and report
+
+### Usage
+To use the ```PhyloTreeSample``` class do the following:
+```
 //create original tree
 pt = phylo_tree.PhyloTreeSample()
 pt.generate_tree(.55) //a node will be the parent of other nodes with given probability 0.55
