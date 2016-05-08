@@ -23,6 +23,8 @@ pt_fit = phylo_tree.PhyloTreeFit()
 pt_fit.fit(dat)
 ```
 
+This uses Python 3.4, and requires NumPy, SciPy, and Scikit-Learn.
+
 ```tester.py``` takes in 2 command line variables, the name of the file to write to and the number of trials to run. 
 Usage:```python tester.py filename n_trials```
 The resulting csv file contains the following information for each trial:
